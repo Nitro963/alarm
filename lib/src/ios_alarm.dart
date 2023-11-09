@@ -8,9 +8,13 @@ import 'package:flutter_fgbg/flutter_fgbg.dart';
 /// Uses method channel to interact with the native platform.
 class IOSAlarm {
   static const methodChannel = MethodChannel('com.gdelataillade/alarm');
-
+  static late AlarmStorage alarmStorage;
   static Map<int, Timer?> timers = {};
   static Map<int, StreamSubscription<FGBGType>?> fgbgSubscriptions = {};
+
+  static Future<void> init(AlarmStorage storage) async {
+    alarmStorage = storage;
+  }
 
   /// Calls the native function `setAlarm` and listens to alarm ring state.
   ///
@@ -21,9 +25,35 @@ class IOSAlarm {
     void Function()? onRing,
   ) async {
     final id = settings.id;
+    late DateTime scheduledDate;
+    if (settings.repeatWeekly || settings.repeatDaily) {
+      DateTime now = DateTime.now();
+      late Duration interval;
+      if (settings.repeatDaily) {
+        interval = const Duration(days: 1);
+        scheduledDate = now.copyWith(
+            hour: settings.dateTime.hour,
+            minute: settings.dateTime.minute,
+            second: 0,
+            microsecond: 0,
+            millisecond: 0);
+        if (scheduledDate.isBefore(now)) {
+          scheduledDate = scheduledDate.add(interval);
+        }
+      } else {
+        interval = const Duration(days: 7);
+        scheduledDate = settings.dateTime;
+        if (scheduledDate.isBefore(now)) {
+          scheduledDate = scheduledDate.next(settings.dayOfWeek);
+        }
+      }
+    } else {
+      scheduledDate = settings.dateTime;
+    }
     try {
-      final delay = settings.dateTime.difference(DateTime.now());
-
+      final delay = scheduledDate.difference(DateTime.now());
+      final (notificationOnAppKillTitle, notificationOnAppKillBody) =
+          await alarmStorage.getNotificationOnAppKill();
       final res = await methodChannel.invokeMethod<bool?>(
             'setAlarm',
             {
@@ -36,10 +66,8 @@ class IOSAlarm {
               'vibrate': settings.vibrate,
               'volumeMax': settings.volumeMax,
               'notifOnKillEnabled': settings.enableNotificationOnKill,
-              'notifTitleOnAppKill':
-                  AlarmStorage.getNotificationOnAppKillTitle(),
-              'notifDescriptionOnAppKill':
-                  AlarmStorage.getNotificationOnAppKillBody(),
+              'notifTitleOnAppKill': notificationOnAppKillTitle,
+              'notifDescriptionOnAppKill': notificationOnAppKillBody,
             },
           ) ??
           false;

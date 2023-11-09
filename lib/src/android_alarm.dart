@@ -10,6 +10,8 @@ import 'package:just_audio/just_audio.dart';
 import 'package:vibration/vibration.dart';
 import 'package:volume_controller/volume_controller.dart';
 
+import '../service/notification.dart';
+
 /// For Android support, [AndroidAlarmManager] is used to trigger a callback
 /// when the given time is reached. The callback will run in an isolate if app
 /// is in background.
@@ -25,10 +27,17 @@ class AndroidAlarm {
   static double? previousVolume;
 
   static bool get isRinging => ringing;
-  static bool get hasOtherAlarms => AlarmStorage.getSavedAlarms().length > 1;
+
+  static Future<bool> get hasOtherAlarms async =>
+      alarmStorage.getAll().then((value) => value.length > 1);
+
+  static late AlarmStorage alarmStorage;
 
   /// Initializes AndroidAlarmManager dependency.
-  static Future<void> init() => AndroidAlarmManager.initialize();
+  static Future<void> init(AlarmStorage storage) async {
+    alarmStorage = storage;
+    await AndroidAlarmManager.initialize();
+  }
 
   /// Creates isolate communication channel and set alarm at given [dateTime].
   static Future<bool> set(
@@ -70,17 +79,46 @@ class AndroidAlarm {
       throw AlarmException('Isolate error: $e');
     }
 
-    if (settings.dateTime.difference(DateTime.now()).inSeconds <= 1) {
+    late final bool res;
+    late DateTime scheduledDate;
+    if (settings.repeatWeekly || settings.repeatDaily) {
+      DateTime now = DateTime.now();
+      late Duration interval;
+      if (settings.repeatDaily) {
+        interval = const Duration(days: 1);
+        scheduledDate = now.copyWith(
+            hour: settings.dateTime.hour,
+            minute: settings.dateTime.minute,
+            second: 0,
+            microsecond: 0,
+            millisecond: 0);
+        if (scheduledDate.isBefore(now)) {
+          scheduledDate = scheduledDate.add(interval);
+        }
+      } else {
+        interval = const Duration(days: 7);
+        scheduledDate = settings.dateTime;
+        if (scheduledDate.isBefore(now)) {
+          scheduledDate = scheduledDate.next(settings.dayOfWeek);
+        }
+      }
+    } else {
+      scheduledDate = settings.dateTime;
+    }
+    if (scheduledDate.difference(DateTime.now()).inSeconds <= 1) {
       await playAlarm(id, {
         "assetAudioPath": settings.assetAudioPath,
         "loopAudio": settings.loopAudio,
         "fadeDuration": settings.fadeDuration,
+        'notificationTitle': settings.notificationTitle,
+        'notificationBody': settings.notificationBody,
+        'androidFullScreenIntent': settings.androidFullScreenIntent,
       });
       return true;
     }
 
-    final res = await AndroidAlarmManager.oneShotAt(
-      settings.dateTime,
+    res = await AndroidAlarmManager.oneShotAt(
+      scheduledDate,
       id,
       AndroidAlarm.playAlarm,
       alarmClock: true,
@@ -92,20 +130,24 @@ class AndroidAlarm {
         'assetAudioPath': settings.assetAudioPath,
         'loopAudio': settings.loopAudio,
         'fadeDuration': settings.fadeDuration,
+        'notificationTitle': settings.notificationTitle,
+        'notificationBody': settings.notificationBody,
+        'androidFullScreenIntent': settings.androidFullScreenIntent,
       },
     );
-
     alarmPrint(
-      'Alarm with id $id scheduled ${res ? 'successfully' : 'failed'} at ${settings.dateTime}',
+      'Alarm with id $id scheduled ${res ? 'successfully' : 'failed'} at $scheduledDate',
     );
 
-    if (settings.enableNotificationOnKill && !hasOtherAlarms) {
+    if (settings.enableNotificationOnKill && !await hasOtherAlarms) {
       try {
+        final (notificationOnAppKillTitle, notificationOnAppKillBody) =
+            await alarmStorage.getNotificationOnAppKill();
         await platform.invokeMethod(
           'setNotificationOnKillService',
           {
-            'title': AlarmStorage.getNotificationOnAppKillTitle(),
-            'description': AlarmStorage.getNotificationOnAppKillBody(),
+            'title': notificationOnAppKillTitle,
+            'description': notificationOnAppKillBody,
           },
         );
         alarmPrint('NotificationOnKillService set with success');
@@ -124,6 +166,22 @@ class AndroidAlarm {
   /// is received from the main thread.
   @pragma('vm:entry-point')
   static Future<void> playAlarm(int id, Map<String, dynamic> data) async {
+    DartPluginRegistrant.ensureInitialized();
+    await AlarmNotification.instance.init();
+    final notificationTitle = data['notificationTitle'];
+    final notificationBody = data['notificationBody'];
+    final androidFullScreenIntent = data['androidFullScreenIntent'];
+
+    if ((notificationTitle?.isNotEmpty ?? false) &&
+        (notificationBody?.isNotEmpty ?? false)) {
+      await AlarmNotification.instance.showAlarmNotif(
+        id: id,
+        title: notificationTitle!,
+        body: notificationBody!,
+        fullScreenIntent: androidFullScreenIntent ?? false,
+      );
+    }
+
     final audioPlayer = AudioPlayer();
 
     final res = IsolateNameServer.lookupPortByName("$ringPort-$id");
@@ -197,6 +255,7 @@ class AndroidAlarm {
       port.listen((message) async {
         send.send('(isolate) received: $message');
         if (message == 'stop') {
+          AlarmNotification.instance.localNotif.cancel(id);
           await audioPlayer.stop();
           await audioPlayer.dispose();
           port.close();
@@ -238,7 +297,7 @@ class AndroidAlarm {
   /// Sets the device volume to the maximum.
   static Future<void> setMaximumVolume() async {
     previousVolume = await VolumeController().getVolume();
-    VolumeController().setVolume(1.0, showSystemUI: true);
+    VolumeController().setVolume(1.0, showSystemUI: false);
   }
 
   /// Sends the message `stop` to the isolate so the audio player
@@ -255,13 +314,20 @@ class AndroidAlarm {
     }
 
     if (previousVolume != null) {
-      VolumeController().setVolume(previousVolume!, showSystemUI: true);
+      VolumeController().setVolume(previousVolume!, showSystemUI: false);
       previousVolume = null;
     }
 
-    if (!hasOtherAlarms) stopNotificationOnKillService();
+    if (!await hasOtherAlarms) stopNotificationOnKillService();
 
-    return await AndroidAlarmManager.cancel(id);
+    return true;
+  }
+
+  /// Dispose alarm.
+  static Future<bool> cancel(int id) async {
+    final res = await AndroidAlarmManager.cancel(id);
+    if (res) alarmPrint('Alarm with id $id cancelled');
+    return res;
   }
 
   static Future<void> stopNotificationOnKillService() async {

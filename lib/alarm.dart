@@ -1,17 +1,45 @@
 // ignore_for_file: avoid_print
 
-export 'package:alarm/model/alarm_settings.dart';
 import 'dart:async';
 
 import 'package:alarm/model/alarm_settings.dart';
-import 'package:alarm/src/ios_alarm.dart';
-import 'package:alarm/src/android_alarm.dart';
 import 'package:alarm/service/notification.dart';
 import 'package:alarm/service/storage.dart';
+import 'package:alarm/src/android_alarm.dart';
+import 'package:alarm/src/ios_alarm.dart';
 import 'package:flutter/foundation.dart';
+
+export 'package:alarm/model/alarm_settings.dart';
+export 'package:alarm/src/android_alarm.dart';
 
 /// Custom print function designed for Alarm plugin.
 DebugPrintCallback alarmPrint = debugPrintThrottled;
+
+extension DateTimeExtension on DateTime {
+  DateTime next(int day) {
+    if (day == weekday) {
+      return add(const Duration(days: 7));
+    } else {
+      return add(
+        Duration(
+          days: (day - weekday) % DateTime.daysPerWeek,
+        ),
+      );
+    }
+  }
+
+  DateTime previous(int day) {
+    if (day == weekday) {
+      return subtract(const Duration(days: 7));
+    } else {
+      return subtract(
+        Duration(
+          days: (weekday - day) % DateTime.daysPerWeek,
+        ),
+      );
+    }
+  }
+}
 
 class Alarm {
   /// Whether it's iOS device.
@@ -22,41 +50,54 @@ class Alarm {
 
   /// Stream of the ringing status.
   static final ringStream = StreamController<AlarmSettings>();
+  static late AlarmStorage storage;
 
   /// Initializes Alarm services.
   ///
-  /// Also calls [checkAlarm] that will reschedule alarms that were set before
+  /// Also calls [checkAlarm] asynchronously to reschedule alarms that were set before
   /// app termination.
   ///
   /// Set [showDebugLogs] to `false` to hide all the logs from the plugin.
-  static Future<void> init({bool showDebugLogs = true}) async {
+  static Future<void> init(
+      {bool showDebugLogs = true, AlarmStorage? db}) async {
     alarmPrint = (String? message, {int? wrapWidth}) {
       if (kDebugMode && showDebugLogs) {
         print("[Alarm] $message");
       }
     };
-
+    storage = db ?? DefaultAlarmStorage();
+    if (!storage.initialized) {
+      await storage.init();
+    }
     await Future.wait([
-      if (android) AndroidAlarm.init(),
+      if (android) AndroidAlarm.init(storage),
+      if (iOS) IOSAlarm.init(storage),
       AlarmNotification.instance.init(),
-      AlarmStorage.init(),
     ]);
-    await checkAlarm();
+    checkAlarm();
   }
 
   /// Checks if some alarms were set on previous session.
   /// If it's the case then reschedules them.
   static Future<void> checkAlarm() async {
-    final alarms = AlarmStorage.getSavedAlarms();
-
+    final alarms = await storage.getAll();
+    final futures = List<Future<bool>>.empty(growable: true);
     for (final alarm in alarms) {
       final now = DateTime.now();
       if (alarm.dateTime.isAfter(now)) {
-        await set(alarmSettings: alarm);
+        futures.add(set(alarmSettings: alarm));
+        continue;
       } else {
-        await AlarmStorage.unsaveAlarm(alarm.id);
+        if (alarm.stalled) {
+          futures.add(storage.deleteAlarm(alarm.id));
+          continue;
+        }
+      }
+      if (alarm.repeatWeekly || alarm.repeatDaily) {
+        futures.add(scheduleRepeatedAlarm(alarm));
       }
     }
+    await Future.wait(futures);
   }
 
   /// Schedules an alarm with given [alarmSettings].
@@ -72,8 +113,8 @@ class Alarm {
         'Provided asset audio file does not have extension: ${alarmSettings.assetAudioPath}',
       );
     }
-
-    for (final alarm in Alarm.getAlarms()) {
+    final alarms = await storage.getAll();
+    for (final alarm in alarms) {
       if (alarm.id == alarmSettings.id ||
           (alarm.dateTime.day == alarmSettings.dateTime.day &&
               alarm.dateTime.hour == alarmSettings.dateTime.hour &&
@@ -82,21 +123,7 @@ class Alarm {
       }
     }
 
-    await AlarmStorage.saveAlarm(alarmSettings);
-
-    if (alarmSettings.notificationTitle != null &&
-        alarmSettings.notificationBody != null) {
-      if (alarmSettings.notificationTitle!.isNotEmpty &&
-          alarmSettings.notificationBody!.isNotEmpty) {
-        await AlarmNotification.instance.scheduleAlarmNotif(
-          id: alarmSettings.id,
-          dateTime: alarmSettings.dateTime,
-          title: alarmSettings.notificationTitle!,
-          body: alarmSettings.notificationBody!,
-          fullScreenIntent: alarmSettings.androidFullScreenIntent,
-        );
-      }
-    }
+    await storage.saveAlarm(alarmSettings);
 
     if (alarmSettings.enableNotificationOnKill) {
       await AlarmNotification.instance.requestPermission();
@@ -117,36 +144,30 @@ class Alarm {
     return false;
   }
 
-  /// When the app is killed, all the processes are terminated
-  /// so the alarm may never ring. By default, to warn the user, a notification
-  /// is shown at the moment he kills the app.
-  /// This methods allows you to customize this notification content.
-  ///
-  /// [title] default value is `Your alarm may not ring`
-  ///
-  /// [body] default value is `You killed the app. Please reopen so your alarm can ring.`
-  static Future<void> setNotificationOnAppKillContent(
-    String title,
-    String body,
-  ) =>
-      AlarmStorage.setNotificationContentOnAppKill(title, body);
-
   /// Stops alarm.
   static Future<bool> stop(int id) async {
-    await AlarmStorage.unsaveAlarm(id);
+    return (iOS ? IOSAlarm.stopAlarm(id) : AndroidAlarm.stop(id))
+        .then((_) => storage.getAlarm(id))
+        .then((alarm) =>
+            alarm?.stalled == true ? cancel(id) : Future.value(true));
+  }
 
+  /// Stops alarm.
+  static Future<bool> cancel(int id) async {
     AlarmNotification.instance.cancel(id);
 
-    return iOS ? await IOSAlarm.stopAlarm(id) : await AndroidAlarm.stop(id);
+    // TODO add ios dispose alarm method
+    return iOS ? IOSAlarm.stopAlarm(id) : AndroidAlarm.cancel(id);
   }
 
   /// Stops all the alarms.
   static Future<void> stopAll() async {
-    final alarms = AlarmStorage.getSavedAlarms();
-
+    final alarms = await storage.getAll();
+    final futures = List<Future<void>>.empty(growable: true);
     for (final alarm in alarms) {
-      await stop(alarm.id);
+      futures.add(stop(alarm.id));
     }
+    await Future.wait(futures);
   }
 
   /// Whether the alarm is ringing.
@@ -154,11 +175,11 @@ class Alarm {
       iOS ? await IOSAlarm.checkIfRinging(id) : AndroidAlarm.isRinging;
 
   /// Whether an alarm is set.
-  static bool hasAlarm() => AlarmStorage.hasAlarm();
+  static Future<bool> get hasAlarm async => storage.hasAlarm;
 
   /// Returns alarm by given id. Returns null if not found.
-  static AlarmSettings? getAlarm(int id) {
-    List<AlarmSettings> alarms = AlarmStorage.getSavedAlarms();
+  static Future<AlarmSettings?> getAlarm(int id) async {
+    List<AlarmSettings> alarms = await storage.getAll();
 
     for (final alarm in alarms) {
       if (alarm.id == id) return alarm;
@@ -168,8 +189,24 @@ class Alarm {
     return null;
   }
 
-  /// Returns all the alarms.
-  static List<AlarmSettings> getAlarms() => AlarmStorage.getSavedAlarms();
+  static Future<bool> scheduleRepeatedAlarm(AlarmSettings settings) async {
+    if (!settings.repeatDaily && !settings.repeatWeekly) return true;
+    final now = DateTime.now();
+    return Alarm.set(
+        alarmSettings: settings.copyWith(
+            repeatWeekly: false,
+            repeatDaily: false,
+            dateTime: settings.repeatWeekly
+                ? now.next(settings.dayOfWeek).copyWith(
+                    hour: settings.dateTime.hour,
+                    minute: settings.dateTime.minute)
+                : settings.repeatDaily
+                    ? now.copyWith(
+                        hour: settings.dateTime.hour,
+                        minute: settings.dateTime.minute)
+                    : throw const AlarmException(
+                        'Scheduling a one shot alarm is illegal')));
+  }
 }
 
 class AlarmException implements Exception {

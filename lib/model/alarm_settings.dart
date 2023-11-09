@@ -1,9 +1,11 @@
 class AlarmSettings {
-  /// Unique identifier assiocated with the alarm.
+  /// Unique identifier associated with the alarm.
   final int id;
 
+  final DateTime _dateTime;
+
   /// Date and time when the alarm will be triggered.
-  final DateTime dateTime;
+  DateTime get dateTime => _dateTime;
 
   /// Path to audio asset to be used as the alarm ringtone. Accepted formats:
   ///
@@ -49,13 +51,23 @@ class AlarmSettings {
   /// [notificationTitle] and [notificationBody] must not be null nor empty.
   final bool androidFullScreenIntent;
 
+  /// Whether to repeat the alarm on a weekly basis. Disabled by default and ignored if [repeatDaily] is enabled
+  final bool repeatWeekly;
+
+  /// Whether to repeat the alarm on a daily basis. Disabled by default
+  /// Has priority over [repeatWeekly]
+  final bool repeatDaily;
+
+  /// The repeat day of week. Ignored if [repeatWeekly] is false or [repeatDaily] is true.
+  final int dayOfWeek;
+
   /// Returns a hash code for this `AlarmSettings` instance using Jenkins hash function.
   @override
   int get hashCode {
     var hash = 0;
 
     hash = hash ^ id.hashCode;
-    hash = hash ^ dateTime.hashCode;
+    hash = hash ^ _dateTime.hashCode;
     hash = hash ^ assetAudioPath.hashCode;
     hash = hash ^ loopAudio.hashCode;
     hash = hash ^ vibrate.hashCode;
@@ -65,6 +77,8 @@ class AlarmSettings {
     hash = hash ^ (notificationBody?.hashCode ?? 0);
     hash = hash ^ enableNotificationOnKill.hashCode;
     hash = hash ^ stopOnNotificationOpen.hashCode;
+    hash = hash ^ repeatWeekly.hashCode;
+    hash = hash ^ dayOfWeek.hashCode;
     hash = hash & 0x3fffffff;
 
     return hash;
@@ -75,9 +89,9 @@ class AlarmSettings {
   ///
   /// Note that if you want to show a notification when alarm is triggered,
   /// both [notificationTitle] and [notificationBody] must not be null nor empty.
-  const AlarmSettings({
+  AlarmSettings({
     required this.id,
-    required this.dateTime,
+    required DateTime dateTime,
     required this.assetAudioPath,
     this.loopAudio = true,
     this.vibrate = true,
@@ -88,7 +102,14 @@ class AlarmSettings {
     this.enableNotificationOnKill = true,
     this.stopOnNotificationOpen = false,
     this.androidFullScreenIntent = true,
-  });
+    this.repeatWeekly = false,
+    this.repeatDaily = false,
+    this.dayOfWeek = 1,
+  }) : _dateTime =
+            dateTime.copyWith(second: 0, microsecond: 0, millisecond: 0) {
+    assert(dayOfWeek <= 7);
+    assert(dayOfWeek > 0);
+  }
 
   /// Constructs an `AlarmSettings` instance from the given JSON data.
   factory AlarmSettings.fromJson(Map<String, dynamic> json) => AlarmSettings(
@@ -103,26 +124,31 @@ class AlarmSettings {
         notificationBody: json['notificationBody'] as String?,
         enableNotificationOnKill: json['enableNotificationOnKill'] as bool,
         stopOnNotificationOpen: json['stopOnNotificationOpen'] as bool,
+        repeatWeekly: json['repeatWeekly'] as bool,
+        repeatDaily: json['repeatDaily'] as bool,
+        dayOfWeek: json['dayOfWeek'] as int,
         androidFullScreenIntent:
             json['androidFullScreenIntent'] as bool? ?? false,
       );
 
   /// Creates a copy of `AlarmSettings` but with the given fields replaced with
   /// the new values.
-  AlarmSettings copyWith({
-    int? id,
-    DateTime? dateTime,
-    String? assetAudioPath,
-    bool? loopAudio,
-    bool? vibrate,
-    bool? volumeMax,
-    double? fadeDuration,
-    String? notificationTitle,
-    String? notificationBody,
-    bool? enableNotificationOnKill,
-    bool? stopOnNotificationOpen,
-    bool? androidFullScreenIntent,
-  }) {
+  AlarmSettings copyWith(
+      {int? id,
+      DateTime? dateTime,
+      String? assetAudioPath,
+      bool? loopAudio,
+      bool? vibrate,
+      bool? volumeMax,
+      double? fadeDuration,
+      String? notificationTitle,
+      String? notificationBody,
+      bool? enableNotificationOnKill,
+      bool? stopOnNotificationOpen,
+      bool? androidFullScreenIntent,
+      bool? repeatWeekly,
+      bool? repeatDaily,
+      int? dayOfWeek}) {
     return AlarmSettings(
       id: id ?? this.id,
       dateTime: dateTime ?? this.dateTime,
@@ -133,6 +159,9 @@ class AlarmSettings {
       fadeDuration: fadeDuration ?? this.fadeDuration,
       notificationTitle: notificationTitle ?? this.notificationTitle,
       notificationBody: notificationBody ?? this.notificationBody,
+      repeatWeekly: repeatWeekly ?? this.repeatWeekly,
+      repeatDaily: repeatDaily ?? this.repeatDaily,
+      dayOfWeek: dayOfWeek ?? this.dayOfWeek,
       enableNotificationOnKill:
           enableNotificationOnKill ?? this.enableNotificationOnKill,
       stopOnNotificationOpen:
@@ -156,6 +185,9 @@ class AlarmSettings {
         'enableNotificationOnKill': enableNotificationOnKill,
         'stopOnNotificationOpen': stopOnNotificationOpen,
         'androidFullScreenIntent': androidFullScreenIntent,
+        'repeatWeekly': repeatWeekly,
+        'repeatDaily': repeatDaily,
+        'dayOfWeek': dayOfWeek,
       };
 
   /// Returns all the properties of `AlarmSettings` for debug purposes.
@@ -182,7 +214,12 @@ class AlarmSettings {
           fadeDuration == other.fadeDuration &&
           notificationTitle == other.notificationTitle &&
           notificationBody == other.notificationBody &&
+          repeatWeekly == other.repeatWeekly &&
+          repeatDaily == other.repeatDaily &&
+          dayOfWeek == other.dayOfWeek &&
           enableNotificationOnKill == other.enableNotificationOnKill &&
           stopOnNotificationOpen == other.stopOnNotificationOpen &&
           androidFullScreenIntent == other.androidFullScreenIntent;
+
+  bool get stalled => repeatWeekly ? false : DateTime.now().isAfter(dateTime);
 }

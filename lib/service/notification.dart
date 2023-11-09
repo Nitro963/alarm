@@ -58,8 +58,8 @@ class AlarmNotification {
 
   /// Stops the alarm.
   static Future<void> stopAlarm(int id) async {
-    if (Alarm.getAlarm(id)?.stopOnNotificationOpen != null &&
-        Alarm.getAlarm(id)!.stopOnNotificationOpen) {
+    final alarm = await Alarm.getAlarm(id);
+    if ((alarm?.stopOnNotificationOpen) ?? false) {
       await Alarm.stop(id);
     }
   }
@@ -72,7 +72,7 @@ class AlarmNotification {
         ? await localNotif
             .resolvePlatformSpecificImplementation<
                 AndroidFlutterLocalNotificationsPlugin>()
-            ?.requestPermission()
+            ?.requestExactAlarmsPermission()
         : await localNotif
             .resolvePlatformSpecificImplementation<
                 IOSFlutterLocalNotificationsPlugin>()
@@ -134,17 +134,67 @@ class AlarmNotification {
         id,
         title,
         body,
-        tz.TZDateTime.from(zdt.toUtc(), tz.UTC),
+        zdt,
         platformChannelSpecifics,
         androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
         uiLocalNotificationDateInterpretation:
             UILocalNotificationDateInterpretation.absoluteTime,
       );
       alarmPrint(
-        'Notification with id $id scheduled successfuly at $zdt GMT',
+        'Notification with id $id scheduled successfully at $zdt',
       );
     } catch (e) {
       throw AlarmException('Schedule notification with id $id error: $e');
+    }
+  }
+
+  /// Show default alarm notification.
+  Future<void> showAlarmNotif({
+    required int id,
+    required String title,
+    required String body,
+    required bool fullScreenIntent,
+  }) async {
+    const iOSPlatformChannelSpecifics = DarwinNotificationDetails(
+      presentAlert: true,
+      presentBadge: false,
+      presentSound: false,
+    );
+
+    final androidPlatformChannelSpecifics = AndroidNotificationDetails(
+      'alarm',
+      'alarm_plugin',
+      channelDescription: 'Alarm plugin',
+      importance: Importance.max,
+      priority: Priority.max,
+      playSound: false,
+      enableLights: true,
+      fullScreenIntent: fullScreenIntent,
+    );
+
+    final platformChannelSpecifics = NotificationDetails(
+      android: androidPlatformChannelSpecifics,
+      iOS: iOSPlatformChannelSpecifics,
+    );
+
+    final hasPermission = await requestPermission();
+    if (!hasPermission) {
+      alarmPrint('Notification permission not granted');
+      return;
+    }
+
+    try {
+      await localNotif.show(
+        id,
+        title,
+        body,
+        platformChannelSpecifics,
+      );
+      alarmPrint(
+        'Notification with id $id shown successfully',
+      );
+    } catch (e) {
+      throw AlarmException('Show notification with id $id error: $e');
     }
   }
 
