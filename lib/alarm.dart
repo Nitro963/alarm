@@ -132,7 +132,28 @@ class Alarm {
     if (iOS) {
       return IOSAlarm.setAlarm(
         alarmSettings,
-        () => ringStream.add(alarmSettings),
+        () async {
+          final notificationTitle = alarmSettings.notificationTitle;
+          final notificationBody = alarmSettings.notificationBody;
+
+          if ((notificationTitle?.isNotEmpty ?? false) &&
+              (notificationBody?.isNotEmpty ?? false)) {
+            try{
+              await AlarmNotification.instance.showAlarmNotif(
+                id: alarmSettings.id,
+                title: notificationTitle!,
+                body: notificationBody!,
+                fullScreenIntent: false,
+              );
+            } catch(e){
+              alarmPrint(
+                'Failed to show notification for alarm with id ${alarmSettings.id}',
+              );
+            }
+          }
+
+          return ringStream.add(alarmSettings);
+        },
       );
     } else if (android) {
       return await AndroidAlarm.set(
